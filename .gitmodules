@@ -1,0 +1,3 @@
+[submodule "scr1"]
+	path = scr1
+	url = git@github.com:syntacore/scr1.git
