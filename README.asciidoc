@@ -1,13 +1,20 @@
-= Barnsley Fern
+= Barnsley test chamber
 :toc:
 :toclevels: 3
 
 Версия: 0.1.
 
-Генератор фрактала Барнсли («папоротник») на C++.
-Точки строятся методом системы итерированных функций (IFS) из четырёх
+Набор C++ программ и стенд для RISC-V ядра SCR1:
+
+* `barnsley_fern` — генератор фрактала Барнсли («папоротник»);
+* `a5_1` — потоковый шифр A5/1 на трёх LFSR;
+* `conway` — игра «Жизнь» Конвея (Gosper glider gun);
+* `scr1/` — сабмодуль SCR1 с bare-metal тестами и трассировщиками
+  (`TRACE_LOGGER`, `TRACE_DISASM`, `STATE_DUMP`).
+
+Фрактал строится методом системы итерированных функций (IFS) из четырёх
 аффинных преобразований с вероятностями 1 %, 85 %, 7 % и 7 %,
-затем растеризуются и сохраняются в изображение формата PPM (P3).
+затем растеризуется и сохраняется в изображение формата PPM (P3).
 
 == Требования
 
@@ -19,21 +26,24 @@
 
 [source,shell]
 ----
-make            # сборка (по умолчанию с графической подсистемой)
-make GRAPHICS=1 # то же самое: графическая подсистема включена
-make GRAPHICS=0 # headless-сборка: изображение не формируется
+make            # сборка всех программ (fern с графической подсистемой)
+make GRAPHICS=1 # то же самое: графическая подсистема fern включена
+make GRAPHICS=0 # headless-сборка fern: изображение не формируется
 ----
 
-После сборки создаётся исполняемый файл `bin/barnsley_fern`,
+После сборки создаются `bin/barnsley_fern`, `bin/a5_1` и `bin/conway`;
 объектные файлы — в `build/`.
 
 == Использование
 
 [source,shell]
 ----
-./bin/barnsley_fern                    # создать fern.ppm в текущем каталоге
-./bin/barnsley_fern --preview          # плюс текстовый предпросмотр в терминале
+./bin/barnsley_fern                      # создать fern.ppm в текущем каталоге
+./bin/barnsley_fern --preview            # плюс текстовый предпросмотр
 ./bin/barnsley_fern --out build/fern.ppm # указать путь выходного файла
+
+./bin/a5_1                               # напечатать 20-битный keystream
+./bin/conway                             # анимация, Ctrl-C для остановки
 ----
 
 === Опции
@@ -52,6 +62,22 @@ make GRAPHICS=0 # headless-сборка: изображение не форми�
 | `--version` | Показать версию и выйти.
 | `-h`, `--help` | Показать справку.
 |===
+
+=== A5/1
+
+`./bin/a5_1` инициализирует A5/1 фиксированными 64-битным ключом и
+22-битным номером кадра и печатает первые 20 бит гаммы. Реализация
+использует регистры R1/R2/R3 (19/22/23 бита) и мажоритарное тактирование.
+
+=== Conway
+
+`./bin/conway` — интерактивная игра «Жизнь» на ториодальной сетке 30x60.
+После запуска выберите режим:
+
+* `1` — случайное заполнение (~25 %);
+* `2` — Gosper glider gun.
+
+Анимация обновляется каждые 80 мс; остановка — `Ctrl-C`.
 
 == Графическая подсистема
 
@@ -83,16 +109,45 @@ display build/fern.ppm
 convert build/fern.ppm fern.png
 ----
 
+== SCR1 testbench
+
+Сабмодуль `scr1/` указывает на форк SCR1 с bare-metal тестами и
+трассировщиками. Требования: Verilator 5.x, RISC-V toolchain (rv32imc) и
+инициализированные `dependencies/riscv-tests` для `riscv_isa`.
+
+[source,shell]
+----
+git submodule update --init --recursive
+cd scr1
+export CROSS_PREFIX=<toolchain>/bin/riscv-none-elf-
+
+# обычный прогон (один процесс на весь список)
+make TARGETS="isr_sample a5_1" run_verilator CROSS_PREFIX=$CROSS_PREFIX
+
+# трассировка: по файлу на каждый тест в build/trace/
+make TARGETS="isr_sample a5_1" run_verilator    CROSS_PREFIX=$CROSS_PREFIX TRACE_LOGGER=1
+make TARGETS="isr_sample a5_1" run_verilator_wf CROSS_PREFIX=$CROSS_PREFIX TRACE_DISASM=1
+make TARGETS="isr_sample a5_1" run_verilator    CROSS_PREFIX=$CROSS_PREFIX STATE_DUMP=1
+----
+
+Выходы: `scr1/build/trace/<test>.log`, `<test>.vcd` и `<test>_state.txt`
+(подробности — `scr1/docs/TRACE_LOGGER.asciidoc` и
+`scr1/docs/STATE_DUMP.asciidoc`). Исходный отчёт (`test_results.txt`,
+`sim_results.txt`) остаётся общим на запуск.
+
 == Цели Makefile
 
 [cols="1,3"]
 |===
 | Цель | Назначение
 
-| `all` | Сборка `bin/barnsley_fern` (по умолчанию).
-| `run` | Сборка и запуск (изображение в `build/fern.ppm`).
+| `all` | Сборка всех программ (по умолчанию).
+| `run`, `run-fern` | Сборка и запуск `barnsley_fern` (изображение в `build/fern.ppm`).
+| `run-a5_1` | Сборка и запуск `a5_1`.
+| `run-conway` | Сборка и запуск `conway` (интерактивно).
+| `run-all` | Запуск всех трёх программ.
 | `test` | Сборка, запуск и проверка корректности `build/fern.ppm`.
-| `test-headless` | Сборка с `GRAPHICS=0` и проверка отсутствия вывода изображения.
+| `test-headless` | Сборка fern с `GRAPHICS=0` и проверка отсутствия вывода изображения.
 | `clean` | Удалить каталог сборки `build/`.
 | `distclean` | `clean` плюс удаление каталога `bin/`.
 | `help` | Список целей.
@@ -104,11 +159,14 @@ convert build/fern.ppm fern.png
 ----
 .
 ├── src/
-│   └── main.cpp            # исходный код
+│   ├── main.cpp            # Barnsley fern
+│   ├── A5_1.cpp            # A5/1 keystream
+│   └── conway.cpp          # Game of Life
+├── scr1/                   # SCR1 testbench submodule (fork)
 ├── docs/
 │   └── CHANGELOG.asciidoc  # история изменений
 ├── build/                  # объекты, зависимости, fern.ppm (генерируется)
-├── bin/                    # barnsley_fern (генерируется)
+├── bin/                    # barnsley_fern, a5_1, conway (генерируется)
 ├── README.asciidoc         # документация
 ├── Makefile                # сборка
 └── .gitignore              # игнорируемые файлы

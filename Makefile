@@ -6,17 +6,21 @@ BUILDDIR := build
 BINDIR   := bin
 DOCDIR   := docs
 
-TARGET := $(BINDIR)/barnsley_fern
+# Programs built from src/ (source file -> binary)
+FERN_BIN   := $(BINDIR)/barnsley_fern
+A5_1_BIN   := $(BINDIR)/a5_1
+CONWAY_BIN := $(BINDIR)/conway
+
 OUTPUT := $(BUILDDIR)/fern.ppm
 
-# Graphics subsystem: GRAPHICS=1 (default) or GRAPHICS=0 (headless).
+# Graphics subsystem of the fern generator: GRAPHICS=1 (default) or GRAPHICS=0 (headless).
 GRAPHICS ?= 1
 
 CXX      ?= g++
-CXXFLAGS := -O3 -Wall -Wextra -std=c++11
+CXXFLAGS := -O3 -Wall -Wextra -std=c++11 -pthread
 CPPFLAGS :=
 LDFLAGS  :=
-LDLIBS   :=
+LDLIBS   := -pthread
 
 ifeq ($(GRAPHICS),1)
 CPPFLAGS += -DENABLE_GRAPHICS=1
@@ -26,8 +30,7 @@ endif
 
 CPPFLAGS += -DPROJECT_VERSION='"$(VERSION)"'
 
-SRCS := $(SRCDIR)/main.cpp
-OBJS := $(BUILDDIR)/main.o
+OBJS := $(BUILDDIR)/main.o $(BUILDDIR)/A5_1.o $(BUILDDIR)/conway.o
 DEPS := $(OBJS:.o=.d)
 BUILDCFG := $(BUILDDIR)/.buildcfg
 
@@ -35,12 +38,18 @@ RM    := rm -f
 RMDIR := rm -rf
 MKDIR := mkdir -p
 
-.PHONY: all run test test-headless clean distclean help FORCE
+.PHONY: all run run-fern run-a5_1 run-conway run-all test test-headless clean distclean help FORCE
 
-all: $(TARGET)
+all: $(FERN_BIN) $(A5_1_BIN) $(CONWAY_BIN)
 
-$(TARGET): $(OBJS) | $(BINDIR)
-	$(CXX) $(LDFLAGS) $(OBJS) -o $@ $(LDLIBS)
+$(FERN_BIN): $(BUILDDIR)/main.o | $(BINDIR)
+	$(CXX) $(LDFLAGS) $< -o $@ $(LDLIBS)
+
+$(A5_1_BIN): $(BUILDDIR)/A5_1.o | $(BINDIR)
+	$(CXX) $(LDFLAGS) $< -o $@ $(LDLIBS)
+
+$(CONWAY_BIN): $(BUILDDIR)/conway.o | $(BINDIR)
+	$(CXX) $(LDFLAGS) $< -o $@ $(LDLIBS)
 
 $(BUILDDIR) $(BINDIR):
 	$(MKDIR) $@
@@ -59,24 +68,35 @@ $(BUILDDIR)/%.o: $(SRCDIR)/%.cpp | $(BUILDDIR)
 
 -include $(DEPS)
 
-run: $(TARGET)
-	./$(TARGET) --out $(OUTPUT)
+run: run-fern
 
-test: $(TARGET)
+run-fern: $(FERN_BIN)
+	./$(FERN_BIN) --out $(OUTPUT)
+
+run-a5_1: $(A5_1_BIN)
+	./$(A5_1_BIN)
+
+# Interactive animation (Ctrl-C to stop).
+run-conway: $(CONWAY_BIN)
+	./$(CONWAY_BIN)
+
+run-all: run-fern run-a5_1 run-conway
+
+test: $(FERN_BIN)
 	$(RM) $(OUTPUT)
-	./$(TARGET) --out $(OUTPUT)
+	./$(FERN_BIN) --out $(OUTPUT)
 	@test -s $(OUTPUT) || { echo "FAIL: $(OUTPUT) not created"; exit 1; }
 	@head -n 1 $(OUTPUT) | grep -qx "P3" || { echo "FAIL: invalid PPM header"; exit 1; }
 	@grep -q "34 139 34" $(OUTPUT) || { echo "FAIL: no rendered pixels"; exit 1; }
 	@echo "PASS: $(OUTPUT) generated and validated"
 
-# Verify the build without the graphics subsystem.
+# Verify the fern build without the graphics subsystem.
 test-headless:
-	$(MAKE) GRAPHICS=0 $(TARGET)
+	$(MAKE) GRAPHICS=0 $(FERN_BIN)
 	$(RM) $(OUTPUT)
-	@./$(TARGET) --out $(OUTPUT) > /dev/null
+	@./$(FERN_BIN) --out $(OUTPUT) > /dev/null
 	@test ! -e $(OUTPUT) || { echo "FAIL: headless build produced $(OUTPUT)"; exit 1; }
-	@./$(TARGET) | grep -q "GRAPHICS=0" || { echo "FAIL: headless mode not reported"; exit 1; }
+	@./$(FERN_BIN) | grep -q "GRAPHICS=0" || { echo "FAIL: headless mode not reported"; exit 1; }
 	@echo "PASS: headless build produces no image"
 
 clean:
@@ -86,12 +106,16 @@ distclean: clean
 	$(RMDIR) $(BINDIR)
 
 help:
-	@echo "Directories: $(SRCDIR)/ (sources), $(BUILDDIR)/ (objects, $(OUTPUT)), $(BINDIR)/ (binary), $(DOCDIR)/ (changelog), README.asciidoc at root"
+	@echo "Directories: $(SRCDIR)/ (sources), $(BUILDDIR)/ (objects, $(OUTPUT)), $(BINDIR)/ (binaries), $(DOCDIR)/ (changelog), README.asciidoc at root"
+	@echo "Programs: $(notdir $(FERN_BIN)) (main.cpp), $(notdir $(A5_1_BIN)) (A5_1.cpp), $(notdir $(CONWAY_BIN)) (conway.cpp)"
 	@echo "Targets:"
-	@echo "  all            Build $(TARGET) (default)"
-	@echo "  run            Build and run"
+	@echo "  all            Build all programs (default)"
+	@echo "  run / run-fern Run $(notdir $(FERN_BIN)) (writes $(OUTPUT))"
+	@echo "  run-a5_1       Run $(notdir $(A5_1_BIN))"
+	@echo "  run-conway     Run $(notdir $(CONWAY_BIN)) (interactive, Ctrl-C to stop)"
+	@echo "  run-all        Run all three"
 	@echo "  test           Build, run and validate $(OUTPUT)"
-	@echo "  test-headless  Build with GRAPHICS=0 and verify no image is produced"
+	@echo "  test-headless  Build fern with GRAPHICS=0 and verify no image is produced"
 	@echo "  clean          Remove the build directory $(BUILDDIR)/"
 	@echo "  distclean      clean + remove $(BINDIR)/"
 	@echo "  help           Show this help"
