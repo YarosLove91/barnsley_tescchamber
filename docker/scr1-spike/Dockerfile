@@ -24,6 +24,10 @@
 #   7. Dev-инструменты: линковщик mold, SMT-решатель Z3 (+ z3-solver в python
 #      venv), openssh-server + entrypoint.sh — для подключения VS Code
 #      (Remote-SSH) внутрь контейнера.
+#   8. riscv-pk (proxy kernel, из исходников, коммит логируется): `pk` (rv64) и
+#      `pk32` (rv32imac) — запуск payload'ов как в README riscv-isa-sim:
+#        spike -d pk hello          # rv64, с дизассемблером
+#        spike --isa=rv32imac_zicsr_zifencei -d pk32 hello32
 #
 # Сборка:  docker build --progress=plain -t scr1-spike-verif:latest docker/scr1-spike \
 #            2>&1 | tee docker/scr1-spike/logs/build.log
@@ -91,7 +95,49 @@ RUN git clone --depth 1 --branch "${VERILATOR_REF}" \
 RUN /opt/verilator/bin/verilator --version
 
 # =============================================================================
-# Stage 3: runtime (база — DiveFuzz: python/venv/библиотеки сохраняются)
+# Stage 3: riscv-pk — proxy kernel для Spike (`spike -d pk hello` из README
+# riscv-isa-sim). Две сборки одним xPack-тулчейном:
+#   pk   — rv64 (дефолт xpack gcc)
+#   pk32 — rv32imac/ilp32 (для сравнения с RV32-прогонами SCR1 на Spike;
+#          A-расширение включено, т.к. pk использует атомики в спинлоках —
+#          запускать под `spike --isa=rv32imac_zicsr_zifencei pk32 ...`)
+# =============================================================================
+FROM ${BASE_IMAGE} AS pk-builder
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates build-essential autoconf automake libtool \
+    && rm -rf /var/lib/apt/lists/*
+
+# Тот же xPack-тарболл, что и в runtime (слой закеширован — копия бесплатна).
+COPY xpack-riscv-none-elf-gcc-*-linux-x64.tar.gz /tmp/xpack.tar.gz
+RUN mkdir -p /opt/xpack-dist \
+    && tar -xzf /tmp/xpack.tar.gz -C /opt/xpack-dist --strip-components=1 \
+    && rm /tmp/xpack.tar.gz
+ENV PATH="/opt/xpack-dist/bin:${PATH}"
+
+# NB: configure riscv-pk ПЕРЕЗАПИСЫВАЕТ CFLAGS своими (configure.ac: CFLAGS="-Wall
+# -Werror ..."), поэтому -march через CFLAGS не работает — только штатные
+# --with-arch/--with-abi (Makefile.in подставит march/mabi сам). xPack GCC 15 по
+# умолчанию собирает без _zicsr, а pk наполнен csrr/csrw → arch ОБЯЗАТЕЛЬНО с
+# _zicsr_zifencei. --with-payload НЕ передаём: дефолт configure = dummy_payload
+# (со значением none master падает: "No rule to make target 'none'").
+RUN git clone https://github.com/riscv-software-src/riscv-pk.git /tmp/riscv-pk \
+    && cd /tmp/riscv-pk \
+    && echo "riscv-pk commit: $(git rev-parse HEAD)" \
+    && mkdir build64 && cd build64 \
+    && ../configure --prefix=/opt/riscv-pk --host=riscv-none-elf \
+         --with-arch=rv64imac_zicsr_zifencei --with-abi=lp64 \
+    && make -j"$(nproc)" && make install \
+    && cd /tmp/riscv-pk && mkdir build32 && cd build32 \
+    && ../configure --prefix=/opt/riscv-pk32 --host=riscv-none-elf \
+         --with-arch=rv32imac_zicsr_zifencei --with-abi=ilp32 \
+    && make -j"$(nproc)" && make install \
+    && ls -l /opt/riscv-pk/riscv-none-elf/bin/pk /opt/riscv-pk32/riscv-none-elf/bin/pk
+
+# =============================================================================
+# Stage 4: runtime (база — DiveFuzz: python/venv/библиотеки сохраняются)
 # =============================================================================
 FROM ${BASE_IMAGE} AS runtime
 USER root
@@ -205,6 +251,30 @@ RUN printf '%s\n' \
 
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# riscv-pk (proxy kernel): `spike [-d] pk hello` (README riscv-isa-sim), для
+# RV32 — `spike --isa=rv32imac_zicsr_zifencei [-d] pk32 hello32`.
+# NB: spike ищет payload НЕ через PATH, а только в `.` и в
+# <prefix>/<target>/bin = /opt/riscv/riscv64-unknown-elf/bin/ — симлинки pk/pk32
+# кладём и туда (для bare `spike pk ...`), и в /usr/local/bin (для путей).
+# Смоук: реальный запуск C-hello (newlib xPack, HTIF) через pk на rv64 и pk32
+# на rv32 — доказывает, что pk грузится и исполняет payload.
+COPY --from=pk-builder /opt/riscv-pk /opt/riscv-pk
+COPY --from=pk-builder /opt/riscv-pk32 /opt/riscv-pk32
+RUN mkdir -p /opt/riscv/riscv64-unknown-elf/bin \
+    && ln -s /opt/riscv-pk/riscv-none-elf/bin/pk  /opt/riscv/riscv64-unknown-elf/bin/pk \
+    && ln -s /opt/riscv-pk32/riscv-none-elf/bin/pk /opt/riscv/riscv64-unknown-elf/bin/pk32 \
+    && ln -s /opt/riscv-pk/riscv-none-elf/bin/pk  /usr/local/bin/pk \
+    && ln -s /opt/riscv-pk32/riscv-none-elf/bin/pk /usr/local/bin/pk32 \
+    && printf '#include <stdio.h>\nint main(){printf("pk hello\\n");return 0;}\n' > /tmp/hello.c \
+    && riscv64-unknown-elf-gcc -O2 -march=rv64imac_zicsr_zifencei -mabi=lp64 \
+         /tmp/hello.c -o /tmp/hello64.elf \
+    && riscv64-unknown-elf-gcc -O2 -march=rv32imac_zicsr_zifencei -mabi=ilp32 \
+         /tmp/hello.c -o /tmp/hello32.elf \
+    && spike pk /tmp/hello64.elf \
+    && spike --isa=rv32imac_zicsr_zifencei pk32 /tmp/hello32.elf \
+    && rm -f /tmp/hello.c /tmp/hello64.elf /tmp/hello32.elf \
+    && echo "pk smoke OK (rv64 pk + rv32 pk32)"
 
 EXPOSE 22
 
