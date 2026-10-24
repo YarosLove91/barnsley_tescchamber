@@ -9,6 +9,9 @@
 /src/a.out
 /src/conway
 
+# Docker-контекст scr1-spike: тяжёлый тарболл xPack (жёсткая ссылка из ~/Work/TOOLS)
+/docker/scr1-spike/*.tar.gz
+
 # Редакторы / ОС
 *.swp
 *.swo
