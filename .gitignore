@@ -11,6 +11,8 @@
 
 # Docker-контекст scr1-spike: тяжёлый тарболл xPack (жёсткая ссылка из ~/Work/TOOLS)
 /docker/scr1-spike/*.tar.gz
+# Логи/артефакты сборок и прогонов (build.log, fern-state/, ...)
+/docker/scr1-spike/logs/
 
 # Редакторы / ОС
 *.swp
