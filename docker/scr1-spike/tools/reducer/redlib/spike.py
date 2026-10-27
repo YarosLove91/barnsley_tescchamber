@@ -35,17 +35,19 @@ class SpikeResult:
         self.wall = None
         self.error = None
         self.log_path = None
+        self.trace = None
 
     def to_dict(self):
-        return {k: v for k, v in self.__dict__.items()}
+        return {k: v for k, v in self.__dict__.items() if k != "trace"}
 
 
 def run_spike(elf, trigger_range=None, timeout=300.0, log_path=None,
-              max_commits=5_000_000, spike_bin="spike"):
+              max_commits=5_000_000, spike_bin="spike", collect_trace=False):
     r = SpikeResult()
     cmd = [spike_bin] + SPIKE_FLAGS + ["-l", "--log-commits", elf]
     t0 = time.monotonic()
     chars = []
+    trace = [] if collect_trace else None
     log_f = open(log_path, "w") if log_path else None
     p = None
     try:
@@ -64,6 +66,8 @@ def run_spike(elf, trigger_range=None, timeout=300.0, log_path=None,
                     break
                 r.n_commits += 1
                 r.last_pc = pc
+                if trace is not None:
+                    trace.append(pc)
                 rest = m.group(4)
                 for mm in GPR_RE.finditer(rest):
                     if int(mm.group(1)) == 10:
@@ -99,4 +103,5 @@ def run_spike(elf, trigger_range=None, timeout=300.0, log_path=None,
     r.console = "".join(chars)
     r.ok = r.reached_stop
     r.log_path = log_path
+    r.trace = trace
     return r

@@ -26,7 +26,7 @@ class RtlResult:
 def parse_console(text):
     fields = {}
     for key in ("chk_a", "chk_b", "checksum", "mcycle", "mcycleh"):
-        m = re.search(re.escape(key) + r"\s*=\s*0x([0-9a-fA-F]+)", text)
+        m = re.search(re.escape(key) + r"\s*=\s*0x([0-9a-fA-F]{8})(?![0-9a-fA-F])", text)
         if m:
             fields[key] = int(m.group(1), 16)
     fields["bug80"] = "BUG #80 reproduced" in text

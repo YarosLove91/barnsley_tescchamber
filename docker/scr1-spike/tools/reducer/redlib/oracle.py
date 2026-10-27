@@ -7,7 +7,8 @@ from . import rtl as rtlmod
 from . import spike as spikemod
 
 STATUSES = ("SameBug", "OtherBug", "NoBug", "InvalidProgram", "TimeoutNoDump", "Nondeterminism")
-CACHE_VERSION = "v1"
+CACHE_VERSION = "v3"
+EPILOGUE_MARKER = "R"
 
 
 class Signature80:
@@ -88,11 +89,10 @@ class Oracle:
 
         sp_fields = rtlmod.parse_console(sp.console)
         rt_fields = rtlmod.parse_console(rt.console)
-        rt_rc = rtlmod.rc_from_console(rt_fields) if (rt_fields["bug80"] or rt_fields["ok80"]
-                                                      or rt_fields["chk_mismatch"]) else (0 if rt.passed else None)
-        if rt_rc is None:
-            rt_rc = 0 if rt.passed else 1
-        detail = {"spike_a0": sp.a0, "rtl_rc": rt_rc,
+        full_mode = rt_fields["bug80"] or rt_fields["ok80"]
+        epilogue_mode = not full_mode
+        rt_rc = rtlmod.rc_from_console(rt_fields) if full_mode else (0 if rt.passed else 1)
+        detail = {"spike_a0": sp.a0, "rtl_rc": rt_rc, "mode": "epilogue" if epilogue_mode else "full",
                   "spike_fields": sp_fields, "rtl_fields": rt_fields}
 
         chk_equal = True
@@ -107,6 +107,20 @@ class Oracle:
 
         if not diverged and sp.a0 == 0 and rt.passed:
             return "NoBug", detail
+
+        if epilogue_mode:
+            sig_ok = (
+                chk_equal
+                and sp.a0 is not None and sp.a0 & 1 == 0
+                and rt_rc & 1 == 1
+                and sp.mcycleh_final in (0, None)
+                and sp_fields.get("mcycleh", 0) == 0
+                and ("mcycleh" not in rt_fields or rt_fields["mcycleh"] != 0)
+                and sp.trigger_executed
+                and EPILOGUE_MARKER in rt.console
+                and EPILOGUE_MARKER in sp.console
+            )
+            return ("SameBug" if sig_ok else "OtherBug"), detail
 
         sig_ok = (
             chk_equal
