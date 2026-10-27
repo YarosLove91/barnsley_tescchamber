@@ -6,6 +6,43 @@
 Формат основан на https://keepachangelog.com/[Keep a Changelog],
 нумерация версий — https://semver.org/[Semantic Versioning].
 
+== [Unreleased]
+
+=== Added
+* Docker-образ верификации `scr1-spike-verif` (`docker/scr1-spike/`, база
+`divefuzz:latest`, Debian 13): свежий Spike master (коммит логируется в лог
+сборки и `/opt/riscv/share/spike-version.txt`), Verilator v5.052 из исходников,
+SCR1 из форка (HTTPS + подмодули) в `/opt/scr1`, xPack riscv-none-elf-gcc 15.2.0
+(newlib-nano) с симлинками `riscv64-unknown-elf-*`, QEMU RISC-V, линковщик mold,
+SMT-решатель Z3 (+ `z3-solver` в python-venv), proxy kernel riscv-pk
+(`pk` rv64 / `pk32` rv32imac), консоль zsh + oh-my-zsh, openssh-server +
+`entrypoint.sh` для подключения VS Code Remote-SSH; скрипт запуска `run.sh`
+(workspace монтируется в `/work`, SSH на `:2222`, персистентный том home).
+* Дифференциальная верификация «SCR1 RTL (Verilator) против свежего Spike»
+(один бинарь на обеих сторонах):
+** тест `fern` (фрактал Барнсли): консольный вывод (баннер + ASCII-сетка 40×90)
+совпал полностью; финальное архитектурное состояние (`STATE_DUMP=1` против
+`spike --log-commits`, останов по PC=0xF8): GPR x0–x31 — 32/32 побитово,
+драйвер `docker/scr1-spike/compare_state.py`;
+** подтверждён upstream-баг https://github.com/syntacore/scr1/issues/80[scr1#80]
+(запись младшей половины `mcycle` ложно инкрементирует `mcycleh`): SCR1 —
+`mcycleh=1`, `__FAIL`; свежий Spike — `mcycleh=0`, a0=0. Тест-репродуктор
+`sim/tests/mcycle` и анализ `docs/ISSUE80_MCYCLE.md` (патч внутри документа,
+НЕ применён) — в подмодуле `scr1`, ветка `test/mcycle-issue80`.
+* C++/FreeRTOS тестовый стенд `sim/tests/mcycle_rtos` (подмодуль `scr1`,
+проиндексирован): вендор-сабсет FreeRTOS-Kernel V11.1.0, кооперативный режим
+без тик-таймера (`configUSE_PREEMPTION=0`, `configMTIME{,CMP}_BASE_ADDRESS=0`)
+— детерминированное идентичное исполнение на RTL и ISS; C++17-задачи
+ComputeA (FixedMatrix Q8 + LCG) → Trigger (#80, метки `ml_trigger_start/end`) →
+ComputeB (RingBuffer + LCG) → Reporter (печать через SIM_PRINT 0xF0000000,
+`sc_exit`); golden-контрольные суммы приложения вшиты из эталонного прогона
+Spike. Дифференциальный прогон: SCR1 `__FAIL`/`mcycleh=1` против Spike
+a0=0/`mcycleh=0`, checksums `chk_a/chk_b` идентичны (336 694 коммита; триггер
+на 59,7 % исполнения) — контрпример для отработки редуктора инструкций.
+* Аналитические отчёты: `DRVFuzz_analysis.asciidoc` (data-sensitive
+дифференциальный фаззинг RISC-V) и `Cascade_reduce_analysis.asciidoc`
+(механизм редукции Cascade + план постепенной замены C-Reduce).
+
 == [0.1] - 2026-10-15
 
 Базовый выпуск (initial release).

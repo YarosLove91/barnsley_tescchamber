@@ -1,3 +1,6 @@
 [submodule "scr1"]
 	path = scr1
 	url = git@github.com:YarosLove91/scr1.git
+[submodule "cascade-meta"]
+	path = cascade-meta
+	url = git@github.com:cascade-artifacts-designs/cascade-meta.git

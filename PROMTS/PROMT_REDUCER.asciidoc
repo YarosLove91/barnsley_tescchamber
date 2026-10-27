@@ -1,0 +1,199 @@
+# ТЗ: пошаговая интеграция редуктора инструкций для дифференциальных контрпримеров SCR1 ↔ Spike
+
+> Назначение: данное ТЗ — вход для ИИ-агента, работающего в **отдельном изолированном
+> worktree** (VS Code / KiloCode, Agent Manager). Агент НЕ имеет доступа к истории
+> чата — всё необходимое здесь. Стиль отчётности: после каждого шага — артефакты +
+> короткий отчёт; коммиты в ветке worktree по Conventional Commits.
+
+## 0. Миссия
+
+На известном контрпримере (баг SCR1 issue #80, программа `mcycle_rtos` — C++/FreeRTOS,
+~336 694 динамических инструкций, триггер на 59,7 % исполнения) отработать механизм
+**редукции инструкций** по схеме из `Cascade_reduce_analysis.asciidoc` (§8.3, §11):
+
+* Фаза 0 — IR + signature-aware оракул;
+* Фаза A — хвостовой бинпоиск (последняя существенная инструкция);
+* Фаза B — головной бинпоиск (pillar + context setter) с fallback «непрерывный префикс
+  истории» (стратегия DRVFuzz) для микроархитектурно-зависимых случаев;
+* Фаза C — ddmin по середине; Фаза D — токен-упрощения.
+
+Целевой результат: контрпример ужат до ~десятка инструкций (ядро триггера #80),
+контрастная пара `larger`(SameBug)/`smaller`(NoBug), метрики «инструкций до/после,
+число RTL-прогонов, wall-time».
+
+## 1. Среда
+
+* Хост: Fedora, репо `~/Work/barnsley` (суперпроект) + сабмодуль `scr1`.
+  Агент работает в worktree суперпроекта; сабмодуль инициализировать
+  (`git submodule update --init scr1`) и переключить на ветку **`test/mcycle-issue80`**
+  форка `git@github.com:YarosLove91/scr1.git` (см. §7 про доступность mcycle_rtos).
+* Docker-образ **`scr1-spike-verif:latest`** (собран заранее; пересборка — только при
+  необходимости, лог в `docker/scr1-spike/logs/`). Внутри: Verilator v5.052
+  (`/opt/verilator`), свежий Spike master `2c300cd9` (`/opt/riscv/bin/spike`, первый в PATH;
+  адаптерный Spike DiveFuzz — `/opt/DiveFuzz/ref/riscv-isa-sim-adapter/build/spike`),
+  xPack riscv-none-elf-gcc 15.2.0 + симлинки `riscv64-unknown-elf-*`, pk/pk32, QEMU,
+  python3 + venv (numpy, matplotlib, PyYAML, capstone, z3-solver), mold, z3.
+* **Паттерн запуска контейнера (критично)**: монтировать дерево по ТОМУ ЖЕ абсолютному
+  пути, что и на хосте, иначе build-каталоги Verilator (абсолютные пути в сгенерированных
+  .mk) ломаются:
+  ```
+  docker run --rm -e SCR1_DIR=<abs>/scr1 \
+    -v <abs>/barnsley:<abs>/barnsley -v <artifacts>:/out \
+    scr1-spike-verif:latest bash <script>
+  ```
+  Хостовый `scr1/build/verilator_*` от хостового Verilator (`VERILATOR_ROOT=/usr/local/...`)
+  НЕ смешивать с контейнерным (`/opt/verilator/...`): при конфликте отложить каталог
+  (`.host-bak`) и дать пересобрать модель в контейнере (~6–10 мин, далее кеш).
+* `/opt/scr1` в образе — чистый клон master `56aabbd` БЕЗ наших тестов; работать только
+  с примонтированным деревом.
+
+## 2. Контрпример и оракул
+
+### 2.1 Программа
+`scr1/sim/tests/mcycle_rtos/` (ветка `test/mcycle-issue80`): FreeRTOS-Kernel V11.1.0
+(вендор-сабсет, MIT), кооперативный режим БЕЗ тика (`configUSE_PREEMPTION=0`,
+`configMTIME{,CMP}_BASE_ADDRESS=0`) — детерминированное идентичное исполнение на RTL и ISS.
+Задачи: ComputeA → Trigger(#80, метки `ml_trigger_start/end`) → ComputeB → Reporter
+(печать через SIM_PRINT `0xF0000000`, выход `sc_exit` → SIM_EXIT `0xF4`/SIM_STOP `0xF8`).
+Golden-чексуммы приложения вшиты в `app/app.hpp` (`CHK_GOLDEN_A/B`).
+Сборка: `make run_verilator CFG=MAX BUS=AHB TARGETS=mcycle_rtos` (цель `mcycle_rtos:`
+в топ-Makefile scr1).
+
+### 2.2 Сигнатура бага (SameBug)
+Issue #80: после `csrw mcycle, 0` при `mcycle[31:8]=0xFFFFFF` (32-бит carry отсутствует):
+SCR1 RTL даёт `mcycleh=1` и a0=1 (`__FAIL`, консоль «BUG #80 reproduced»); Spike (эталон)
+— `mcycleh=0`, a0=0 («OK: mcycleh unchanged»). `chk_a/chk_b/checksum` идентичны на обеих
+сторонах (golden self-check: бит 2 в a0).
+Root cause (НЕ ЧИНИТЬ, см. §6): `scr1/src/core/pipeline/scr1_pipe_csr.sv:908-909`
+(и `minstret`:945-946) — записные ветки берут `csr_mcycle_hi_new` вместо `_ff`.
+
+### 2.3 Запуск эталона (Spike) — проверенная команда
+```
+spike --no-dm --disable-dtb --pc=0x200 --isa=rv32imc_zicsr_zifencei \
+  -m0x0:0x10000,0x480000:0x10000,0x490000:0x1000,0xf0000000:0x1000 \
+  -l --log-commits <elf> 2>&1 | sed '/0x000000f8 (0x0000006f)/q'
+```
+Обоснование флагов (по исходникам Spike master, только ЧТЕНИЕ — код Spike не менять):
+`--no-dm` освобождает `[0x0,0x1000)` (debug module) под `.text.init`; `--disable-dtb` —
+иначе boot ROM встанет на 0x1000; `--pc=0x200` — reset vector SCR1 = ELF entry; карта `-m`:
+RAM 0x0:64K (text.init + LMA-копии секций, `link_tcm.ld` `>TCM AT>RAM`, Spike грузит
+сегменты по **p_paddr**, crt_tcm.S сам перемещает код в TCM), TCM 0x480000:64K,
+mtime-TCSR 0x490000:4K (crt пишет — на Spike это RAM, безвредно), outport 0xF0000000:4K.
+Формат commit-лога (однострочный): `core N: <priv> 0x<pc> (0x<insn>)` + ` x <rd> 0x<v>`
++ ` c<num>_<csr> 0x<v>` + ` mem 0x<addr> [0x<v>]`. Консоль программы = все stores в
+`0xF0000000` (байт = младшие 8 бит значения). Парсер-образец:
+`docker/scr1-spike/compare_state.py`, драйвер двух проходов:
+`docker/scr1-spike/logs/mcycle-rtos/verify_rtos.sh`.
+
+### 2.4 Оракул редуктора
+Статусная модель (по DRVFuzz, 6 статусов): `SameBug` (та же сигнатура: mcycleh-расхождение
++ a0 бит 0 + триггер исполнен), `OtherBug` (расхождение есть, но другое — напр. chk mismatch),
+`NoBug`, `InvalidProgram` (срез не собирается/не идёт на ISS), `TimeoutNoDump` (не дошёл до
+0xF8), `Nondeterminism` (статус плавает между прогонами). **Префильтр**: сначала Spike
+(секунды), RTL (десятки секунд) — только если ISS-состояние валидно. Кэш срез→статус.
+Эталон для среза ПЕРЕСЧИТЫВАТЬ ISS-ом (приём Cascade), а не хранить от полной программы.
+
+## 3. Фаза 0 — IR и сборка срезов
+
+* IR = плоский список инструкций `.text` (TCM-область 0x480000+) из `objdump -d` +
+  служебные точки: `text.init` 0x0..0x400 (вектора 0xC0, entry 0x200, SIM_EXIT 0xF4 nop,
+  SIM_STOP 0xF8 `j .`), метки триггера, границы задач.
+* Сборка среза в запускаемый ELF: регенерация `.S` (мнемоники или `.byte/.half/.word` по
+  кодировкам — второй вариант надёжнее: не зависит от дизассемблера), сохранение адресации
+  (VMA/LMA как в `link_tcm.ld`), хвост — эпилог `li a0,<rc>; j 0xF4` (или сохранить
+  оригинальный Reporter-эпилог, если срез до него доходит). Сборка:
+  `riscv64-unknown-elf-gcc -nostartfiles -nostdlib -march=rv32imc_zicsr_zifencei
+  -mabi=ilp32 --specs=nano.specs -T <скрипт>`; hex для tb — `objcopy -O verilog`.
+* Прогон произвольного hex на RTL: повторить вызов симулятора из `sim/Makefile`
+  (бинарь `scr1_top_tb_ahb` с плюс-аргами `+test_info=...` и т.п.) ИЛИ завести служебный
+  тест-каталог с прокси-Makefile. test_results + консоль — из лога симуляции.
+* Критерий приёмки Фазы 0: на полном `mcycle_rtos` оракул стабильно даёт `SameBug`
+  (≥3 прогонов подряд); замерена стоимость вызова (ISS ~1–3 c, RTL ~30–90 c);
+  ground truth: 3370 статических инструкций, триггер 0x004820ee..0x0048211a
+  (стат. индекс 2924), динамика 336 694 коммита, триггер на коммите 200 971.
+
+## 4. Фазы A–D (по шагам интеграции)
+
+* **Шаг 2 / Фаза A (хвост)**: бинпоиск последней существенной инструкции
+  (порт `_find_failing_bb`/`_find_failing_instr_in_bb` из Cascade на наш IR; инвариант
+  left=NoBug/right=SameBug). Ожидание: хвост после `csrr mcycleh` (Reporter и ComputeB)
+  отсекается; бюджет ≤ 40 RTL-прогонов.
+* **Шаг 3 / Фаза B (голова)**: pillar-бинпоиск + **context setter**: состояние в точке
+  pillar берётся из Spike-прогона полного теста (GPR x1–x31; CSR — минимально необходимые;
+  память — записанные до pillar байты из `mem`-строк лога; у нас store'ов в приложении
+  почти нет — только стек/куча FreeRTOS), синтезируется пролог `li/lui+addi`-последовательностями
+  + jump на pillar. Если context setter гасит баг — fallback: бинпоиск начала непрерывного
+  префикса реальной истории `[start..=target]` (стратегия DRVFuzz). Ожидание: ComputeA
+  отсекается; бюджет ≤ 40 RTL-прогонов.
+* **Шаг 4 / Фаза C (ddmin)**: удаление «мусора» из середины (подмножествами, Zeller),
+  NOP-замена там, где удаление ломает поток; запускать только после A/B (малый n).
+* **Шаг 5 / Фаза D (токены)**: упрощение операндов/непосредственных (large→0/1/-1/2^k),
+  слияние регистров по данным ISS-трейса, замена инструкций на `addi x0,x0,0` — каждое
+  преобразование принимается только при `SameBug`.
+* **Финал**: контрастная пара `app_buggy.elf`/`app_ok.elf` + `err.log` + метрики JSON
+  (инструкций до/после, RTL-прогонов, wall-time) в `docker/scr1-spike/logs/reducer/`.
+  Целевая длина финального контрпримера: ≤ ~30 инструкций (ядро: `csrw mcycleh,0;
+  csrw mcycle,0; li t0,0xffffff00; csrw mcycle,t0; [nops ≤256 циклов]; csrw mcycle,0;
+  csrr a1,mcycleh` + минимальный crt/эпилог).
+
+Каждый шаг = отдельная сессия агента: отчёт + артефакты + коммит(ы) в ветке worktree.
+
+## 5. Ограничения (жёсткие)
+
+1. **Не модифицировать RTL** (`scr1/src/**`) — баг #80 должен оставаться жив; патч лежит
+   в `scr1/docs/ISSUE80_MCYCLE.md` и применяется только по отдельной команде пользователя.
+2. **Не модифицировать Spike** (ни исходники, ни бинари) — только штатные CLI-флаги.
+3. Не менять общие файлы тестовой инфраструктуры (`scr1/sim/tests/common/**`) — вся новая
+   обвязка живёт в barnsley (`docker/scr1-spike/tools/reducer/` или подобном) и/или в
+   отдельных тест-каталогах.
+4. Детерминизм: срезы обязаны давать идентичный результат в повторных прогонах; при
+   нестабильности — статус `Nondeterminism`, не «плавающий» вердикт.
+5. Пересборка docker-образа — только при реальной необходимости (дорого); сборки образа
+   согласовывать с пользователем.
+6. Бюджет: RTL-прогон — главная стоимость; алгоритм минимизирует их число (бинпоиски
+   O(log n), кэш, ISS-префильтр). Наивные O(n) циклы по RTL — только на коротких срезах.
+
+## 6. Материалы и ссылки
+
+* **Исходники Cascade — ОТКУДА извлекаем reducer**: сабмодуль `cascade-meta/` в корне
+  barnsley (`git@github.com:cascade-artifacts-designs/cascade-meta.git`, gitlink `c3de482`).
+  Главный файл: **`cascade-meta/fuzzer/cascade/reduce.py`** (868 строк; строки сверены с
+  c3de482): `reduce_program:640`, `is_mismatch:254`, `gen_reduced_elf:170`,
+  `_save_ctx_and_jump_to_pillar_specific_instr:32`, `_find_failing_bb:313`,
+  `_find_pillar_bb:357`, `_find_failing_instr_in_bb:408`, `_find_pillar_instr:465`,
+  `_turn_sandwich_instructions_into_nops:520`, `_try_flatten_cf:271`. Связанные модули
+  (`cascade-meta/fuzzer/cascade/`): `contextreplay.py` (`SavedContext:56`,
+  `gen_context_setter:78`), `fuzzsim.py` (`runtest_simulator:154`), `spikeresolution.py`
+  (`spike_resolution:270`, `gen_ctx_regdump_reqs:90`). Режим — только ЧТЕНИЕ (GPL-3.0):
+  портируем алгоритмы в свою кодовую базу, их код в наши деревья не копируем.
+* `Cascade_reduce_analysis.asciidoc` (корень barnsley) — механизм редукции Cascade:
+  §2 оракул, §3/§4 бинпоиски хвоста/головы, §7 сводная схема, §8.3 целевая архитектура,
+  §11 план (этапы 0–4, волны миграции C-Reduce).
+* `DRVFuzz_analysis.asciidoc` — §3 редукция delta-debugging, 6-статусный оракул,
+  history-префикс fallback, §1.1 feedback.
+* `scr1/docs/ISSUE80_MCYCLE.md` — описание бага #80 + патч (НЕ применять).
+* `docker/scr1-spike/logs/{fern,fern-state,mcycle,mcycle-rtos}/RESULT.md` — проверенные
+  методики и команды всех прогонов; `compare_state.py` — парсер commit-лога/GPR/CSR;
+  `verify_rtos.sh` — драйвер двух проходов (дифференциал + golden).
+* `PROMTS/PROMT_SPIKE.md` — требования к docker-образу; `PROMTS/CONTEXT.md` — полный
+  контекст проекта (обновлять по ходу работы!).
+* C-Reduce ступень (гибрид, опционально после фаз A/B): образец
+  `PROMTS/Docker_examples/Simply_spike.dockerfile` (creduce-riscv: interestingness =
+  Spike vs PicoRV32-Verilator для `.s`).
+
+## 7. Состояние на момент составления ТЗ (2026-10-27)
+
+* scr1, ветка `test/mcycle-issue80` (origin, pushed): `5dfed60 test(scr1): add mcycle
+  issue #80 reproducer and analysis doc` (короткий тест `sim/tests/mcycle` + док).
+* **`sim/tests/mcycle_rtos` + цель в топ-Makefile — ПРОИНДЕКСИРОВАНЫ в основном worktree,
+  коммит по команде пользователя.** Агенту в worktree: до коммита брать файлы из основного
+  worktree (`~/Work/barnsley/scr1/...`), после — `git fetch && git checkout
+  test/mcycle-issue80`.
+* Локальный `scr1` master = `0342a00` (per-test trace/state outputs, pushed в origin);
+  `upstream` = syntacore/scr1 (не пушим туда ничего).
+* Артефакты прогонов: `docker/scr1-spike/logs/` (gitignored) — fern (консоль MATCH),
+  fern-state (GPR 32/32 MATCH), mcycle (подтверждение #80), mcycle-rtos (FreeRTOS-стенд,
+  DIFFERENTIAL CONFIRMED).
+* Хостовые build-каталоги scr1: `*.host-bak` — от хостового Verilator, не трогать;
+  рабочий `verilator_AHB_MAX_imc_..._STATE_0` сгенерирован в контейнере (переиспользуем
+  при identical-path монтировании).
