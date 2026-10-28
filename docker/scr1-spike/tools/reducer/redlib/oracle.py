@@ -1,13 +1,14 @@
 import hashlib
 import json
 import os
+import subprocess
 import time
 
 from . import rtl as rtlmod
 from . import spike as spikemod
 
 STATUSES = ("SameBug", "OtherBug", "NoBug", "InvalidProgram", "TimeoutNoDump", "Nondeterminism")
-CACHE_VERSION = "v3"
+CACHE_VERSION = "v5"
 EPILOGUE_MARKER = "R"
 
 
@@ -66,12 +67,24 @@ class Oracle:
         os.replace(tmp, self.cache_path)
 
     @staticmethod
-    def hex_key(hex_path):
+    def _sha256(path):
         h = hashlib.sha256()
-        with open(hex_path, "rb") as f:
+        with open(path, "rb") as f:
             for chunk in iter(lambda: f.read(1 << 20), b""):
                 h.update(chunk)
-        return h.hexdigest() + "|" + CACHE_VERSION
+        return h.hexdigest()
+
+    @staticmethod
+    def _phdr_digest(elf_path):
+        out = subprocess.run(["readelf", "-lW", elf_path], capture_output=True,
+                             text=True).stdout
+        lines = [l for l in out.splitlines() if "LOAD" in l]
+        return hashlib.sha256("\n".join(lines).encode()).hexdigest()[:16]
+
+    @classmethod
+    def slice_key(cls, elf_path, hex_path):
+        return (cls._sha256(hex_path)[:40] + cls._phdr_digest(elf_path)
+                + "|" + CACHE_VERSION)
 
     def classify(self, sp, rt):
         if sp is None:
@@ -135,7 +148,7 @@ class Oracle:
         return ("SameBug" if sig_ok else "OtherBug"), detail
 
     def check(self, elf, hex_path, label=None, force=False, repeat=1):
-        key = self.hex_key(hex_path)
+        key = self.slice_key(elf, hex_path)
         if self.use_cache and not force and key in self.cache:
             ent = self.cache[key]
             return OracleResult(ent["status"], cached=True,

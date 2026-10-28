@@ -3,11 +3,12 @@
 # дерево монтируется ПО ТОМУ ЖЕ абсолютному пути, что и на хосте (иначе
 # build-каталоги Verilator с абсолютными путями в .mk ломаются).
 #
-# Использование: run_container.sh <script.sh> [доп. аргументы docker run...]
+# Использование: run_container.sh <script.sh> [аргументы скрипта...]
 #   WT — корень worktree (по умолчанию — репозиторий, содержащий этот скрипт).
 set -euo pipefail
 
-SCRIPT="${1:?usage: run_container.sh <script.sh>}"
+SCRIPT="${1:?usage: run_container.sh <script.sh> [args...]}"
+shift
 WT="${WT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)}"
 OUT="${OUT:-$WT/docker/scr1-spike/logs/reducer}"
 mkdir -p "$OUT"
@@ -19,4 +20,4 @@ exec docker run --rm \
     -v "$WT:$WT" \
     -v "$OUT:/out" \
     -w "$WT" \
-    scr1-spike-verif:latest bash "$SCRIPT"
+    scr1-spike-verif:latest bash "$SCRIPT" "$@"

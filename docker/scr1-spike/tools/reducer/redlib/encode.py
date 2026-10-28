@@ -87,6 +87,14 @@ def sb(rs2, imm, rs1):
     return _s(imm, rs2, rs1, 0, 0x23)
 
 
+def sh(rs2, imm, rs1):
+    return _s(imm, rs2, rs1, 1, 0x23)
+
+
+def sw(rs2, imm, rs1):
+    return _s(imm, rs2, rs1, 2, 0x23)
+
+
 def csrrs(rd, csr, rs1):
     return _i(csr, rs1, 2, rd, 0x73)
 

@@ -43,8 +43,8 @@ class SliceBuild:
             raise ValueError("patch at %#x overflows section %s" % (addr, s["name"]))
         s["data"][off:off + len(data)] = data
 
-    def add_extra(self, name, addr, data):
-        self.extras.append(dict(name=name, addr=addr, data=bytes(data)))
+    def add_extra(self, name, addr, data, lma=None):
+        self.extras.append(dict(name=name, addr=addr, data=bytes(data), lma=lma))
 
     def build(self, outdir, name):
         os.makedirs(outdir, exist_ok=True)
@@ -87,7 +87,10 @@ class SliceBuild:
             s_lines.append("")
             place = ">TCM" if region == "TCM" else ">RAM"
             if nobits:
-                ld_lines.append("  %s %#x (NOLOAD) : { *(%s) } %s" % (sname, addr, sname, place))
+                ld_lines.append("  %s %#x (NOLOAD) : AT(%#x) { *(%s) } %s"
+                                % (sname, addr, addr, sname, place))
+            elif s.get("lma") is not None:
+                ld_lines.append("  %s %#x : AT(%#x) { *(%s) } %s" % (sname, addr, s["lma"], sname, place))
             elif region == "TCM":
                 ld_lines.append("  %s %#x : { *(%s) } >TCM AT>RAM" % (sname, addr, sname))
             else:

@@ -117,7 +117,6 @@ def main():
               and sp_run.get("first_trigger_commit") == GROUND_TRUTH["first_trigger_commit"])
     report["ground_truth_dynamic_ok"] = dyn_ok
 
-    idn_key = Oracle.hex_key(art["hex"])
     idn_res = oracle.check(art["elf"], art["hex"], label="identity_slice")
     report["identity_slice_oracle"] = {"status": idn_res.status, "cached": idn_res.cached}
     print("identity slice oracle: %s (cached=%s)" % (idn_res.status, idn_res.cached))
