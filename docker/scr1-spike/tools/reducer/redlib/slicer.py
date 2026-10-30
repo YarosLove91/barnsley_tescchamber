@@ -17,9 +17,10 @@ def _region(addr):
 
 
 class SliceBuild:
-    def __init__(self, env, base_elf):
+    def __init__(self, env, base_elf, lma_equals_vma=False):
         self.env = env
         self.base_elf = base_elf
+        self.lma_equals_vma = lma_equals_vma
         self.entry = binutils.entry(env, base_elf)
         secs = [s for s in binutils.sections(env, base_elf) if s["alloc"]]
         self.sections = []
@@ -44,7 +45,8 @@ class SliceBuild:
         s["data"][off:off + len(data)] = data
 
     def add_extra(self, name, addr, data, lma=None):
-        self.extras.append(dict(name=name, addr=addr, data=bytes(data), lma=lma))
+        self.extras.append(dict(name=name, addr=addr, data=bytes(data), lma=lma,
+                                extra=True))
 
     def build(self, outdir, name):
         os.makedirs(outdir, exist_ok=True)
@@ -89,10 +91,17 @@ class SliceBuild:
             if nobits:
                 ld_lines.append("  %s %#x (NOLOAD) : AT(%#x) { *(%s) } %s"
                                 % (sname, addr, addr, sname, place))
-            elif s.get("lma") is not None:
-                ld_lines.append("  %s %#x : AT(%#x) { *(%s) } %s" % (sname, addr, s["lma"], sname, place))
+            elif s.get("extra"):
+                if s.get("lma") is not None:
+                    ld_lines.append("  %s %#x : AT(%#x) { *(%s) } >TCM"
+                                    % (sname, addr, s["lma"], sname))
+                else:
+                    ld_lines.append("  %s %#x : { *(%s) } %s" % (sname, addr, sname, place))
+            elif self.lma_equals_vma:
+                ld_lines.append("  %s %#x : { *(%s) } %s" % (sname, addr, sname, place))
             elif region == "TCM":
-                ld_lines.append("  %s %#x : { *(%s) } >TCM AT>RAM" % (sname, addr, sname))
+                ld_lines.append("  %s %#x : AT(%#x) { *(%s) } >TCM"
+                                % (sname, addr, s["lma"], sname))
             else:
                 ld_lines.append("  %s %#x : { *(%s) } >RAM" % (sname, addr, sname))
         ld_lines.append("}")

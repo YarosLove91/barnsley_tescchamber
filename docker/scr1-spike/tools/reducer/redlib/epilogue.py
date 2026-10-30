@@ -31,6 +31,18 @@ def gen_epilogue_min():
     return E.words_to_bytes(words)
 
 
+def gen_epilogue_direct():
+    words = [
+        E.lui(E.T1, OUTPORT_HI),
+        E.li_small(E.T2, MARKER),
+        E.sb(E.T2, 0, E.T1),
+        E.csrr(E.A0, E.CSR_MCYCLEH),
+        E.li_small(E.T0, SIM_EXIT),
+        E.jr(E.T0),
+    ]
+    return E.words_to_bytes(words)
+
+
 def gen_epilogue_verbose(str_addr, con_puts_addr, con_puthex_addr):
     words = []
     words += [E.lui(E.T1, OUTPORT_HI), E.li_small(E.T2, MARKER), E.sb(E.T2, 0, E.T1)]

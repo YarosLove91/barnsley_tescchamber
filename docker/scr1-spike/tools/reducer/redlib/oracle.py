@@ -8,7 +8,7 @@ from . import rtl as rtlmod
 from . import spike as spikemod
 
 STATUSES = ("SameBug", "OtherBug", "NoBug", "InvalidProgram", "TimeoutNoDump", "Nondeterminism")
-CACHE_VERSION = "v5"
+CACHE_VERSION = "v6"
 EPILOGUE_MARKER = "R"
 
 
@@ -23,13 +23,16 @@ class Signature80:
 
 
 class OracleResult:
-    def __init__(self, status, spike=None, rtl=None, cached=False, runs=None, detail=None):
+    def __init__(self, status, spike=None, rtl=None, cached=False, runs=None,
+                 detail=None, spike_commits=None):
         self.status = status
         self.spike = spike
         self.rtl = rtl
         self.cached = cached
         self.runs = runs or 1
         self.detail = detail or {}
+        self.spike_commits = spike_commits if spike_commits is not None else \
+            (spike.n_commits if spike is not None else None)
 
     def to_dict(self):
         return {
@@ -152,7 +155,8 @@ class Oracle:
         if self.use_cache and not force and key in self.cache:
             ent = self.cache[key]
             return OracleResult(ent["status"], cached=True,
-                                detail=ent.get("detail", {}), runs=ent.get("runs", 1))
+                                detail=ent.get("detail", {}), runs=ent.get("runs", 1),
+                                spike_commits=ent.get("spike_commits"))
         if not os.path.exists(elf):
             return OracleResult("InvalidProgram", detail={"error": "elf missing: %s" % elf})
 
@@ -182,6 +186,7 @@ class Oracle:
         if self.use_cache and final.status != "Nondeterminism":
             self.cache[key] = {"status": final.status, "detail": final.detail,
                                "runs": repeat, "ts": time.time(),
+                               "spike_commits": final.spike_commits,
                                "label": label, "elf": elf, "hex": hex_path}
             self._save_cache()
         return final
