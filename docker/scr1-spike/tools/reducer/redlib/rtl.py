@@ -44,6 +44,21 @@ def rc_from_console(fields):
     return rc
 
 
+def extract_program_console(clean):
+    i = clean.find("---Test:")
+    if i >= 0:
+        nl = clean.find("\n", i)
+        i = nl + 1 if nl >= 0 else len(clean)
+    else:
+        i = 0
+    j = len(clean)
+    for marker in ("Test passed", "Test failed", "Error: TIMEOUT"):
+        k = clean.find(marker, i)
+        if 0 <= k < j:
+            j = k
+    return clean[i:j]
+
+
 def run_rtl(env, hex_path, run_dir, timeout=300.0, imem="FFFFFFFF", dmem="FFFFFFFF"):
     r = RtlResult()
     name = os.path.basename(hex_path)
@@ -70,19 +85,20 @@ def run_rtl(env, hex_path, run_dir, timeout=300.0, imem="FFFFFFFF", dmem="FFFFFF
     log_path = os.path.join(run_dir, "rtl_stdout.log")
     t0 = time.monotonic()
     try:
-        p = subprocess.run(cmd, cwd=run_dir, capture_output=True, text=True, timeout=timeout)
-        stdout = p.stdout
-        r.error = None if p.returncode == 0 else "exit=%d %s" % (p.returncode, p.stderr[-2000:])
+        p = subprocess.run(cmd, cwd=run_dir, capture_output=True, timeout=timeout)
+        stdout = p.stdout.decode("latin-1")
+        r.error = None if p.returncode == 0 else \
+            "exit=%d %s" % (p.returncode, p.stderr.decode("latin-1", "replace")[-2000:])
     except subprocess.TimeoutExpired as e:
-        stdout = (e.stdout or b"").decode("utf-8", "replace") if isinstance(e.stdout, bytes) else (e.stdout or "")
+        stdout = (e.stdout or b"").decode("latin-1")
         r.timed_out = True
         r.error = "wall timeout %.0fs" % timeout
     r.wall = time.monotonic() - t0
     clean = ANSI_RE.sub("", stdout)
-    with open(log_path, "w") as f:
+    with open(log_path, "w", encoding="latin-1") as f:
         f.write(clean)
     r.log_path = log_path
-    r.console = clean
+    r.console = extract_program_console(clean)
     if "Error: TIMEOUT" in clean:
         r.timed_out = True
     if os.path.exists(results):

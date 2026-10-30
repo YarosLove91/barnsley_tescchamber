@@ -2,7 +2,7 @@ X0, RA, SP, GP, TP, T0, T1, T2 = 0, 1, 2, 3, 4, 5, 6, 7
 S0, S1 = 8, 9
 A0, A1, A2, A3, A4, A5, A6, A7 = 10, 11, 12, 13, 14, 15, 16, 17
 S3, S4 = 19, 20
-T3 = 28
+T3, T4, T5, T6 = 28, 29, 30, 31
 
 CSR_MCYCLE = 0xB00
 CSR_MCYCLEH = 0xB80
@@ -47,6 +47,30 @@ def addi(rd, rs1, imm):
 
 def sltu(rd, rs1, rs2):
     return _r(0, rs2, rs1, 3, rd, 0x33)
+
+
+def add(rd, rs1, rs2):
+    return _r(0, rs2, rs1, 0, rd, 0x33)
+
+
+def sub(rd, rs1, rs2):
+    return _r(0x20, rs2, rs1, 0, rd, 0x33)
+
+
+def srli(rd, rs1, shamt):
+    return _i(shamt & 0x1F, rs1, 5, rd, 0x13)
+
+
+def ori(rd, rs1, imm):
+    return _i(imm, rs1, 4, rd, 0x13)
+
+
+def andi(rd, rs1, imm):
+    return _i(imm, rs1, 7, rd, 0x13)
+
+
+def slli(rd, rs1, shamt):
+    return _i(shamt & 0x1F, rs1, 1, rd, 0x13)
 
 
 def snez(rd, rs):

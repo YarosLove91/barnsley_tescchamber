@@ -12,14 +12,106 @@ CACHE_VERSION = "v6"
 EPILOGUE_MARKER = "R"
 
 
-class Signature80:
+class Signature:
+    kind = "generic"
+
+    def __init__(self, trigger_range=None):
+        self.trigger_range = trigger_range
+
+    def classify_state(self, sp, rt, sp_fields, rt_fields):
+        raise NotImplementedError
+
+
+class Signature80(Signature):
     """mcycleh-расхождение SCR1 issue #80: Spike mcycleh=0/a0 bit0=0,
     RTL mcycleh!=0/a0 bit0=1, триггер исполнен, chk_a/chk_b идентичны."""
 
     kind = "mcycleh_divergence"
 
-    def __init__(self, trigger_range):
-        self.trigger_range = trigger_range
+    def classify_state(self, sp, rt, sp_fields, rt_fields):
+        full_mode = rt_fields["bug80"] or rt_fields["ok80"]
+        epilogue_mode = not full_mode
+        rt_rc = rtlmod.rc_from_console(rt_fields) if full_mode else (0 if rt.passed else 1)
+        detail = {"spike_a0": sp.a0, "rtl_rc": rt_rc,
+                  "mode": "epilogue" if epilogue_mode else "full",
+                  "spike_fields": sp_fields, "rtl_fields": rt_fields}
+
+        chk_equal = True
+        for key in ("chk_a", "chk_b"):
+            if key in sp_fields and key in rt_fields:
+                chk_equal &= (sp_fields[key] == rt_fields[key])
+        detail["chk_equal"] = chk_equal
+
+        diverged = (sp.a0 != rt_rc) or (
+            "mcycleh" in sp_fields and "mcycleh" in rt_fields
+            and sp_fields["mcycleh"] != rt_fields["mcycleh"]) or not chk_equal
+
+        if not diverged and sp.a0 == 0 and rt.passed:
+            return "NoBug", detail
+
+        if epilogue_mode:
+            sig_ok = (
+                chk_equal
+                and sp.a0 is not None and sp.a0 & 1 == 0
+                and rt_rc & 1 == 1
+                and sp.mcycleh_final in (0, None)
+                and sp_fields.get("mcycleh", 0) == 0
+                and ("mcycleh" not in rt_fields or rt_fields["mcycleh"] != 0)
+                and sp.trigger_executed
+                and EPILOGUE_MARKER in rt.console
+                and EPILOGUE_MARKER in sp.console
+            )
+            return ("SameBug" if sig_ok else "OtherBug"), detail
+
+        sig_ok = (
+            chk_equal
+            and sp.a0 is not None and sp.a0 & 1 == 0
+            and rt_rc & 1 == 1
+            and (sp.mcycleh_final in (0, None))
+            and sp_fields.get("mcycleh", 0) == 0
+            and rt_fields.get("bug80", False)
+            and sp.trigger_executed
+            and ("mcycleh" in rt_fields)
+        )
+        return ("SameBug" if sig_ok else "OtherBug"), detail
+
+
+def extract_sum(console, marker="S"):
+    """Сумма = 'S' + 8 digit-символов (0x30..0x3F), по паре на байт (BE).
+    Печатный формат: без NUL (Verilator $write("%c",0) их глотает) и без
+    коллизий с маркером; декод lossless."""
+    i = console.rfind(marker)
+    if i < 0 or len(console) < i + 9:
+        return None
+    digits = console[i + 1:i + 9]
+    if not all("0" <= c <= "?" for c in digits):
+        return None
+    val = 0
+    for k in range(4):
+        val = (val << 8) | ((ord(digits[2 * k]) - 0x30) << 4) \
+            | (ord(digits[2 * k + 1]) - 0x30)
+    return val
+
+
+class SignatureSum(Signature):
+    """Демо «сломанный add»: расхождение контрольной суммы, напечатанной
+    как 'S' + 4 сырых байта (BE) на обеих сторонах. Spike-эталон чист (a0=0)."""
+
+    kind = "sum_divergence"
+
+    def classify_state(self, sp, rt, sp_fields, rt_fields):
+        sp_sum = extract_sum(sp.console)
+        rt_sum = extract_sum(rt.console)
+        detail = {"spike_a0": sp.a0, "rtl_passed": rt.passed,
+                  "spike_sum": sp_sum, "rtl_sum": rt_sum}
+        if sp_sum is None or rt_sum is None:
+            return "OtherBug", detail
+        if sp_sum == rt_sum:
+            if (sp.a0 == 0) == bool(rt.passed):
+                return "NoBug", detail
+            return "OtherBug", detail
+        sig_ok = sp.a0 == 0 and (self.trigger_range is None or sp.trigger_executed)
+        return ("SameBug" if sig_ok else "OtherBug"), detail
 
 
 class OracleResult:
@@ -105,50 +197,7 @@ class Oracle:
 
         sp_fields = rtlmod.parse_console(sp.console)
         rt_fields = rtlmod.parse_console(rt.console)
-        full_mode = rt_fields["bug80"] or rt_fields["ok80"]
-        epilogue_mode = not full_mode
-        rt_rc = rtlmod.rc_from_console(rt_fields) if full_mode else (0 if rt.passed else 1)
-        detail = {"spike_a0": sp.a0, "rtl_rc": rt_rc, "mode": "epilogue" if epilogue_mode else "full",
-                  "spike_fields": sp_fields, "rtl_fields": rt_fields}
-
-        chk_equal = True
-        for key in ("chk_a", "chk_b"):
-            if key in sp_fields and key in rt_fields:
-                chk_equal &= (sp_fields[key] == rt_fields[key])
-        detail["chk_equal"] = chk_equal
-
-        diverged = (sp.a0 != rt_rc) or (
-            "mcycleh" in sp_fields and "mcycleh" in rt_fields
-            and sp_fields["mcycleh"] != rt_fields["mcycleh"]) or not chk_equal
-
-        if not diverged and sp.a0 == 0 and rt.passed:
-            return "NoBug", detail
-
-        if epilogue_mode:
-            sig_ok = (
-                chk_equal
-                and sp.a0 is not None and sp.a0 & 1 == 0
-                and rt_rc & 1 == 1
-                and sp.mcycleh_final in (0, None)
-                and sp_fields.get("mcycleh", 0) == 0
-                and ("mcycleh" not in rt_fields or rt_fields["mcycleh"] != 0)
-                and sp.trigger_executed
-                and EPILOGUE_MARKER in rt.console
-                and EPILOGUE_MARKER in sp.console
-            )
-            return ("SameBug" if sig_ok else "OtherBug"), detail
-
-        sig_ok = (
-            chk_equal
-            and sp.a0 is not None and sp.a0 & 1 == 0
-            and rt_rc & 1 == 1
-            and (sp.mcycleh_final in (0, None))
-            and sp_fields.get("mcycleh", 0) == 0
-            and rt_fields.get("bug80", False)
-            and sp.trigger_executed
-            and ("mcycleh" in rt_fields)
-        )
-        return ("SameBug" if sig_ok else "OtherBug"), detail
+        return self.sig.classify_state(sp, rt, sp_fields, rt_fields)
 
     def check(self, elf, hex_path, label=None, force=False, repeat=1):
         key = self.slice_key(elf, hex_path)
